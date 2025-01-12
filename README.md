@@ -78,7 +78,7 @@ When break condition reached, SIGTRAP will be called on the main process, number
 - SetWatchPoint(int number, const void* address, uint32_t condition) - installs / modifies watch point
 - GetWatchPoint() - returns last triggered watch point
 
-```C++
+```C
 static void HandleFaultSignal(int signal, siginfo_t* information, void* context)
 {
   if ((information->si_signo == SIGTRAP) &&
@@ -92,6 +92,76 @@ static void HandleFaultSignal(int signal, siginfo_t* information, void* context)
 SetWatchPoint(0, &something, WATCHPOINT_BREAK_ON_WRITE | WATCHPOINT_LENGTH_DWORD);
 
 ```
+
+## DebugDecoder
+
+Allows to resolve source file and line from instruction pointer using DWARF.
+
+- Could be used in different cases such as stack backtrace
+- Could load DWARF from binary
+- In case of stripped binary:
+  - tries to load DWARF from /usr/lib/debug/ (usually used by debug symbol packages)
+  - tries to load DWARF using libdebuginfod (https://sourceware.org/elfutils/Debuginfod.html)
+- Has caching.
+- Allows loading on-demand as well as synchronous and asynchronous preload.
+
+### Preload
+
+Preload is optional.
+
+- UpdateDebugCache(DEBUG_UPDATE_SYNCHRONOUS)
+- UpdateDebugCache(DEBUG_UPDATE_ASYNCHRONOUS)
+- CancelUpdateDebugCache()
+
+### GetDebugInformation
+
+int GetDebugInformation(Dl_info* information, struct link_map* map, uintptr_t address, struct DebugSourceInformation* buffer, int lock)
+
+- *information* and *map* are optioan and required only to save some CPU cycles if you need to call dladdr1() before
+- *address* is an instruction pointer value
+- *lock* depends on your need:
+  - DEBUG_GET_LOCK_WAIT - get data anyway, but deadlock might happen (useful in regular code)
+  - DEBUG_GET_LOCK_DONT_WAIT - avoid a deadlock, data should not be provided when locked (usuful in signal handlers)
+
+### Usage
+
+Without reuse dladdr1() data:
+
+
+```C
+  struct DebugSourceInformation result;
+
+  uint64_t address = (uint64_t)(void*)HandleProgramHeader1;
+
+  if (GetDebugInformation(NULL, NULL, address, &result, DEBUG_GET_LOCK_DONT_WAIT) != 0)
+  {
+    printf("result: %s:%d.%d %d\n", result.path, result.line, result.column, result.address == address);
+    ReleaseDebugInformation(&result);
+  }
+
+```
+
+With reuse dladdr1() data:
+
+```C
+  Dl_info information;
+  struct link_map* map;
+
+  if (dladdr1(address, &information, (void**)&map, RTLD_DL_LINKMAP) != 0)
+  {
+    if (GetDebugInformation(&information, map, (uintptr_t)address, &source, DEBUG_GET_LOCK_DONT_WAIT) != 0)
+    {
+      printf("%s (%s) - %s:%lld.%lld\n", information.dli_sname, information.dli_fname, source.path, source.line, source.column);
+      ReleaseDebugInformation(&source);
+    }
+    else
+    {
+      printf("%s (%s)\n", information.dli_sname, information.dli_fname);      
+    }
+  }
+
+```
+
 
 ## P.S.
 
