@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include <numeric>
+#include <iterator>
 
 // https://github.com/gcc-mirror/gcc/blob/master/libstdc++-v3/libsupc++/unwind-cxx.h
 #undef _GLIBCXX_HAVE_SYS_SDT_H
