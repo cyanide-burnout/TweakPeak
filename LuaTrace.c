@@ -6,26 +6,27 @@
 
 #include <stdio.h>
 #include <syslog.h>
+#include <alloca.h>
 #include <libunwind.h>
 
 #define BUFFER_LENGTH  8192
 
 #ifdef TLC_TRACEABLE
 
+__attribute__((noinline, noclone, optimize("O0"), optimize("no-omit-frame-pointer"), optimize("no-optimize-sibling-calls")))
 #ifdef __x86_64__
-int __attribute__((optimize("O0"), sysv_abi))
-  MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, lua_State* state)
-  //                   RDI          RSI             RDX           RCX            R8           R9           [RBP + 16]
+__attribute__((sysv_abi))
+int MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, lua_State* state)
+//                       RDI          RSI             RDX           RCX            R8           R9           [RBP + 16]
 #endif
 #ifdef __aarch64__
-int __attribute__((optimize("O0")))
-  MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, long dummy3, long dummy4, lua_State* state)
-  //                   R0           R1              R2            R3             R4           R5           R6           R7           [SP + 0]
+int MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, long dummy3, long dummy4, lua_State* state)
+//                       R0           R1              R2            R3             R4           R5           R6           R7           [SP + 0]
 #endif
 #ifdef __arm__
-int __attribute__((optimize("O0"), pcs("aapcs")))
-  MakeTraceableLuaCall(long method, long arguments, long results, long function, lua_State* state)
-  //                   R0           R1              R2            R3             [SP + 0]
+__attribute__((pcs("aapcs")))
+int MakeTraceableLuaCall(long method, long arguments, long results, long function, lua_State* state)
+//                       R0           R1              R2            R3             [SP + 0]
 #endif
 {
   switch (method)
@@ -42,16 +43,24 @@ int __attribute__((optimize("O0"), pcs("aapcs")))
   }
 }
 
-lua_State* GetLuaStateOnStack()
+lua_State* GetLuaStateOnStack(void* context)
 {
   unw_cursor_t cursor;
-  unw_context_t context;
   unw_proc_info_t information;
   unw_word_t stack;
   void** arguments;
 
-  unw_getcontext(&context);
-  unw_init_local(&cursor, &context);
+  if (context != NULL)
+  {
+    // Likely called by signal handler with alternative stack
+    unw_init_local2(&cursor, (unw_context_t*)context, UNW_INIT_SIGNAL_FRAME);
+  }
+  else
+  {
+    context = alloca(sizeof(unw_context_t));
+    unw_getcontext((unw_context_t*)context);
+    unw_init_local(&cursor, (unw_context_t*)context);
+  }
 
   while (unw_step(&cursor) > 0)
   {
@@ -113,12 +122,12 @@ int GetLuaTraceBack(lua_State* state, char* buffer, size_t size)
   return level;
 }
 
-int MakeLuaTraceReport(siginfo_t* information, LuaTraceReportFunction report)
+int MakeLuaTraceReport(siginfo_t* information, void* context, LuaTraceReportFunction report)
 {
   lua_State* state;
   char buffer[BUFFER_LENGTH];
 
-  if (state = GetLuaStateOnStack())
+  if (state = GetLuaStateOnStack(context))
   {
     GetLuaTraceBack(state, buffer, BUFFER_LENGTH);
     report(LOG_ERR, "Lua stack trace:\n%s\n", buffer);

@@ -92,7 +92,8 @@ struct WatchContext
   struct DebugRegisterState set;
   atomic_int state;
   sem_t semaphore;
-  pid_t process;
+  pid_t parent;
+  pid_t child;
   void* stack;
   int status;
   int error;
@@ -115,7 +116,7 @@ static void SaveDebugRegisterState(struct WatchContext* context, siginfo_t* info
 {
   uint32_t status;
 
-  status  = ptrace(PTRACE_PEEKUSER, context->process, DR(6), 0);
+  status  = ptrace(PTRACE_PEEKUSER, context->parent, DR(6), 0);
   status &= 0b1111;
 
   context->status = 
@@ -128,12 +129,12 @@ static void SaveDebugRegisterState(struct WatchContext* context, siginfo_t* info
 
 static void LoadDebugRegisterState(struct WatchContext* context)
 {
-  ptrace(PTRACE_POKEUSER, context->process, DR(0), context->set.addresses[0]);
-  ptrace(PTRACE_POKEUSER, context->process, DR(1), context->set.addresses[1]);
-  ptrace(PTRACE_POKEUSER, context->process, DR(2), context->set.addresses[2]);
-  ptrace(PTRACE_POKEUSER, context->process, DR(3), context->set.addresses[3]);
-  ptrace(PTRACE_POKEUSER, context->process, DR(7), context->set.control);
-  ptrace(PTRACE_POKEUSER, context->process, DR(6), 0);
+  ptrace(PTRACE_POKEUSER, context->parent, DR(0), context->set.addresses[0]);
+  ptrace(PTRACE_POKEUSER, context->parent, DR(1), context->set.addresses[1]);
+  ptrace(PTRACE_POKEUSER, context->parent, DR(2), context->set.addresses[2]);
+  ptrace(PTRACE_POKEUSER, context->parent, DR(3), context->set.addresses[3]);
+  ptrace(PTRACE_POKEUSER, context->parent, DR(7), context->set.control);
+  ptrace(PTRACE_POKEUSER, context->parent, DR(6), 0);
 }
 #endif
 
@@ -165,10 +166,10 @@ static void LoadDebugRegisterState(struct WatchContext* context)
 
   for (number = 0; number < 15; number ++)
   {
-    ptrace(PTRACE_SETHBPREGS, context->process, - (number * 2 + 1), &context->set.state[number].address);
-    ptrace(PTRACE_SETHBPREGS, context->process,   (number * 2 + 1), &context->set.state[number].address);
-    ptrace(PTRACE_SETHBPREGS, context->process, - (number * 2 + 2), context->set.state[number].control + HWP);
-    ptrace(PTRACE_SETHBPREGS, context->process,   (number * 2 + 2), context->set.state[number].control + HBP);
+    ptrace(PTRACE_SETHBPREGS, context->parent, - (number * 2 + 1), &context->set.state[number].address);
+    ptrace(PTRACE_SETHBPREGS, context->parent,   (number * 2 + 1), &context->set.state[number].address);
+    ptrace(PTRACE_SETHBPREGS, context->parent, - (number * 2 + 2), context->set.state[number].control + HWP);
+    ptrace(PTRACE_SETHBPREGS, context->parent,   (number * 2 + 2), context->set.state[number].control + HBP);
   }
 }
 #endif
@@ -206,8 +207,8 @@ static void LoadDebugRegisterState(struct WatchContext* context)
   vector1.iov_len  = sizeof(struct user_hwdebug_state);
   vector2.iov_len  = sizeof(struct user_hwdebug_state);
 
-  ptrace(PTRACE_SETREGSET, context->process, NT_ARM_HW_WATCH, &vector1);
-  ptrace(PTRACE_SETREGSET, context->process, NT_ARM_HW_BREAK, &vector2);
+  ptrace(PTRACE_SETREGSET, context->parent, NT_ARM_HW_WATCH, &vector1);
+  ptrace(PTRACE_SETREGSET, context->parent, NT_ARM_HW_BREAK, &vector2);
 }
 #endif
 
@@ -228,7 +229,7 @@ static int DoWork(void* agrument)
   context = (struct WatchContext*)agrument;
   prctl(PR_SET_NAME, "Watcher", NULL, NULL, NULL);
 
-  if (ptrace(PTRACE_ATTACH, context->process, 0, 0) != 0)
+  if (ptrace(PTRACE_ATTACH, context->parent, 0, 0) != 0)
   {
     context->error = errno;
     atomic_thread_fence(memory_order_release);
@@ -241,7 +242,7 @@ static int DoWork(void* agrument)
 
   while (STATE_RUN)
   {
-    waitpid(context->process, &status, 0);
+    waitpid(context->parent, &status, 0);
     signal = WSTOPSIG(status);
 
     if ((WIFEXITED(status) != 0) ||
@@ -252,7 +253,7 @@ static int DoWork(void* agrument)
     }
 
     if ((signal == SIGTRAP) &&
-        (ptrace(PTRACE_GETSIGINFO, context->process, 0, &information) == 0) &&
+        (ptrace(PTRACE_GETSIGINFO, context->parent, 0, &information) == 0) &&
         (information.si_code == TRAP_HWBKPT))
     {
       // Save debug status register in case of TRAP_HWBKPT only
@@ -262,15 +263,15 @@ static int DoWork(void* agrument)
     atomic_thread_fence(memory_order_acq_rel);
     LoadDebugRegisterState(context);
 
-    ptrace(PTRACE_CONT, context->process, 0, signal);
+    ptrace(PTRACE_CONT, context->parent, 0, signal);
   }
 
   memset(&context->set, 0, sizeof(struct DebugRegisterState));
   LoadDebugRegisterState(context);
 
-  ptrace(PTRACE_DETACH, context->process, 0, signal);
+  ptrace(PTRACE_DETACH, context->parent, 0, signal);
   atomic_store_explicit(&context->state, STATE_STOP, memory_order_relaxed);
-  kill(0, SIGCONT);  // That prevents the process to become a zombie
+  kill(context->parent, SIGCONT);
 
   return EXIT_SUCCESS;
 }
@@ -296,8 +297,8 @@ void TerminateWatch()
   {
     if (atomic_exchange_explicit(&context->state, STATE_STOP, memory_order_relaxed) == STATE_RUN)
     {
-      kill(context->process, SIGNAL);
-      waitpid(context->process, NULL, 0);
+      kill(context->child, SIGNAL);
+      waitpid(context->child, NULL, 0);
     }
 
     sem_destroy(&context->semaphore);
@@ -315,10 +316,10 @@ int SetWatchPoint(int number, const void* address, uint32_t condition)
 
   if (context == NULL)
   {
-    context = (struct WatchContext*)mmap(NULL, sizeof(struct WatchContext), PROT_WRITE | PROT_READ, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    context->stack   = mmap(NULL, STACK_SIZE, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_GROWSDOWN | MAP_ANONYMOUS, -1, 0);
-    context->process = getpid();
-    context->status  = -1;
+    context         = (struct WatchContext*)mmap(NULL, sizeof(struct WatchContext), PROT_WRITE | PROT_READ, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    context->stack  = mmap(NULL, STACK_SIZE, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_GROWSDOWN | MAP_ANONYMOUS, -1, 0);
+    context->parent = getpid();
+    context->status = -1;
     sem_init(&context->semaphore, 1, 0);
     atomic_init(&context->state, 0);
   }
@@ -328,11 +329,11 @@ int SetWatchPoint(int number, const void* address, uint32_t condition)
 
   if (atomic_load_explicit(&context->state, memory_order_relaxed) == STATE_STOP)
   {
-    clone(DoWork, context->stack + STACK_SIZE, SIGCHLD, context);
+    context->child = clone(DoWork, context->stack + STACK_SIZE, SIGCHLD, context);
     sem_wait(&context->semaphore);
   }
 
-  kill(context->process, SIGNAL);
+  kill(context->parent, SIGNAL);
   pthread_mutex_unlock(&lock);
 
   return context->error;
@@ -350,7 +351,7 @@ int GetWatchPoint()
   return context->status;
 }
 
-int MakeWatchPointReport(siginfo_t* information, WatchPointReportFunction report)
+int MakeWatchPointReport(siginfo_t* information, void* context, WatchPointReportFunction report)
 {
   int number;
 

@@ -11,9 +11,9 @@
 
 //  CheckExceptionHandler
 
-#define HasExceptionHandler(type)  CheckExceptionHandler(typeid(type), sizeof(type))
+#define HasExceptionHandler(context, type)  CheckExceptionHandler(context, typeid(type), sizeof(type))
 
-bool CheckExceptionHandler(const std::type_info& type, std::size_t size) noexcept;
+bool CheckExceptionHandler(void* context, const std::type_info& type, std::size_t size) noexcept;
 
 // ExceptionTrace
 

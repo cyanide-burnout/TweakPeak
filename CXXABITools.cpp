@@ -43,10 +43,9 @@ union AlignedExeptionPointer
   __cxxabiv1::__cxa_refcounted_exception* exception;
 };
 
-static bool CheckExceptionHandler(_Unwind_Exception* exception, int skip) noexcept
+static bool CheckExceptionHandler(void* context, _Unwind_Exception* exception, int skip) noexcept
 {
   unw_cursor_t cursor;
-  unw_context_t context;
   unw_proc_info_t information;
 
   _Unwind_Context* state;
@@ -83,8 +82,17 @@ static bool CheckExceptionHandler(_Unwind_Exception* exception, int skip) noexce
 
   // Unwind stack, call every personality for search
 
-  unw_getcontext(&context);
-  unw_init_local(&cursor, &context);
+  if (context != nullptr)
+  {
+    // Likely called by signal handler with alternative stack
+    unw_init_local2(&cursor, reinterpret_cast<unw_context_t*>(context), UNW_INIT_SIGNAL_FRAME);
+  }
+  else
+  {
+    context = alloca(sizeof(unw_context_t));
+    unw_getcontext(reinterpret_cast<unw_context_t*>(context));
+    unw_init_local(&cursor, reinterpret_cast<unw_context_t*>(context));
+  }
 
   while ((skip > 0) &&
          (unw_step(&cursor) > 0))
@@ -116,7 +124,7 @@ static bool CheckExceptionHandler(_Unwind_Exception* exception, int skip) noexce
   return false;
 }
 
-bool CheckExceptionHandler(const std::type_info& type, std::size_t size) noexcept
+bool CheckExceptionHandler(void* context, const std::type_info& type, std::size_t size) noexcept
 {
   AlignedExeptionPointer pointer;
 
@@ -129,7 +137,7 @@ bool CheckExceptionHandler(const std::type_info& type, std::size_t size) noexcep
   memset(pointer.exception, 0, size);
   __cxxabiv1::__cxa_init_primary_exception(pointer.exception + 1, const_cast<std::type_info*>(&type), nullptr);
 
-  return CheckExceptionHandler(&pointer.exception->exc.unwindHeader, 2);
+  return CheckExceptionHandler(context, &pointer.exception->exc.unwindHeader, 2);
 }
 
 // ExceptionTrace

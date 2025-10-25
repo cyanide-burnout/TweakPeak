@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+//  DW_LIBDWARF_VERSION "0.11.1"
+
 struct SourceLine
 {
   Dwarf_Addr address;
@@ -166,7 +168,12 @@ static void ReleaseDebugUnitCache()
       dwarf_dealloc(unit->instance, unit->aranges, DW_DLA_LIST);
     }
 
+#ifndef DW_LIBDWARF_VERSION
     dwarf_finish(unit->instance, &error);
+#else
+    dwarf_finish(unit->instance);
+#endif
+
     elf_end(unit->module);
     close(unit->handle);
 
@@ -222,11 +229,15 @@ static struct DebugUnit* GetDebugUnit(const char* name, debuginfod_client* clien
     unit->handle = open(name, O_RDONLY);
 
     if ((unit->handle >= 0) &&
-        (unit->module  = elf_begin(unit->handle, ELF_C_READ_MMAP, NULL)) &&
+        (unit->module  = elf_begin(unit->handle, ELF_C_READ, NULL)) &&
         (GetELFSection(unit->module, ".debug_info", &header) != NULL))
     {
       // Result does not matter
+#ifndef DW_LIBDWARF_VERSION
       dwarf_elf_init(unit->module, DW_DLC_READ, NULL, NULL, &unit->instance, &error);
+#else
+      dwarf_init_b(unit->handle, DW_GROUPNUMBER_ANY, NULL, NULL, &unit->instance, &error);
+#endif
     }
 
     // Try to load separated .debug file
@@ -248,10 +259,14 @@ static struct DebugUnit* GetDebugUnit(const char* name, debuginfod_client* clien
       unit->module = NULL;
 
       if ((unit->handle >= 0) &&
-          (unit->module  = elf_begin(unit->handle, ELF_C_READ_MMAP, NULL)))
+          (unit->module  = elf_begin(unit->handle, ELF_C_READ, NULL)))
       {
         // Result does not matter
+#ifndef DW_LIBDWARF_VERSION
         dwarf_elf_init(unit->module, DW_DLC_READ, NULL, NULL, &unit->instance, &error);
+#else
+        dwarf_init_b(unit->handle, DW_GROUPNUMBER_ANY, NULL, NULL, &unit->instance, &error);
+#endif
       }
     }
 
@@ -270,10 +285,14 @@ static struct DebugUnit* GetDebugUnit(const char* name, debuginfod_client* clien
       unit->handle = result;
       unit->module = NULL;
 
-      if (unit->module = elf_begin(unit->handle, ELF_C_READ_MMAP, NULL))
+      if (unit->module = elf_begin(unit->handle, ELF_C_READ, NULL))
       {
         // Result does not matter
+#ifndef DW_LIBDWARF_VERSION
         dwarf_elf_init(unit->module, DW_DLC_READ, NULL, NULL, &unit->instance, &error);
+#else
+        dwarf_init_b(unit->handle, DW_GROUPNUMBER_ANY, NULL, NULL, &unit->instance, &error);
+#endif
       }
     }
 
@@ -341,8 +360,14 @@ static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address
 
   if (dwarf_attr(entry, DW_AT_ranges, &attribute, &error) == DW_DLV_OK)  // <-- Memory leak?
   {
+#ifndef DW_LIBDWARF_VERSION
     if ((dwarf_global_formref(attribute, &offset, &error)                                    == DW_DLV_OK) &&
         (dwarf_get_ranges_a(unit->instance, offset, entry, &ranges, &count, &length, &error) == DW_DLV_OK))
+#else
+    if ((dwarf_global_formref(attribute, &offset, &error)                                          == DW_DLV_OK) &&
+        (dwarf_get_ranges_b(unit->instance, offset, entry, NULL, &ranges, &count, &length, &error) == DW_DLV_OK))
+
+#endif
     {
       for (number = 0; number < count; ++ number)
       {
@@ -355,7 +380,11 @@ static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address
         }
       }
 
+#ifndef DW_LIBDWARF_VERSION
       dwarf_ranges_dealloc(unit->instance, ranges, count);
+#else
+      dwarf_dealloc_ranges(unit->instance, ranges, count);
+#endif
     }
 
     dwarf_dealloc(unit->instance, attribute, DW_DLA_ATTR);
@@ -412,8 +441,13 @@ static int IterateOverChildren(struct DebugUnit* unit, Dwarf_Die* entry, uintptr
         }
       }
 
+#ifndef DW_LIBDWARF_VERSION
       previous = current;
       result   = dwarf_siblingof(unit->instance, previous, &current, &error);  // <-- Memory leak?
+#else
+      previous = current;
+      result   = dwarf_siblingof_b(unit->instance, previous, 1, &current, &error);
+#endif
 
       dwarf_dealloc(unit->instance, previous, DW_DLA_DIE);
     }
@@ -453,13 +487,23 @@ static Dwarf_Die GetDebugEntry(struct DebugUnit* unit, uintptr_t address)
 
   if (entry == NULL)
   {
+    offset = 0;
+
     while (dwarf_next_cu_header_d(unit->instance, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &offset, NULL, &error) == DW_DLV_OK)
     {
+#ifndef DW_LIBDWARF_VERSION
       if ((entry == NULL) &&  // Don't optimize a loop, cursor has to pass all compilation units
           (dwarf_siblingof(unit->instance, NULL, &entry, &error) == DW_DLV_OK) &&
           ((dwarf_tag(entry, &tag, &error) != DW_DLV_OK) ||
            (tag != DW_TAG_compile_unit) ||
            (CheckRange(unit, entry, address) == 0)))
+#else
+      if ((entry == NULL) &&
+          (dwarf_siblingof_b(unit->instance, NULL, 1, &entry, &error) == DW_DLV_OK) &&
+          ((dwarf_tag(entry, &tag, &error) != DW_DLV_OK) ||
+           (tag != DW_TAG_compile_unit) ||
+           (CheckRange(unit, entry, address) == 0)))
+#endif
       {
         dwarf_dealloc(unit->instance, entry, DW_DLA_DIE);
         entry = NULL;
@@ -471,11 +515,19 @@ static Dwarf_Die GetDebugEntry(struct DebugUnit* unit, uintptr_t address)
 
   if (entry == NULL)
   {
+    offset = 0;
+
     while (dwarf_next_cu_header_d(unit->instance, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &offset, NULL, &error) == DW_DLV_OK)
     {
+#ifndef DW_LIBDWARF_VERSION
       if ((entry == NULL) &&  // Don't optimize a loop, cursor has to pass all compilation units
           (dwarf_siblingof(unit->instance, NULL, &entry, &error) == DW_DLV_OK) &&
           (IterateOverChildren(unit, &entry, address) == 0))
+#else
+      if ((entry == NULL) &&
+          (dwarf_siblingof_b(unit->instance, NULL, 1, &entry, &error) == DW_DLV_OK) &&
+          (IterateOverChildren(unit, &entry, address) == 0))
+#endif
       {
         dwarf_dealloc(unit->instance, entry, DW_DLA_DIE);
         entry = NULL;
@@ -574,7 +626,7 @@ int GetDebugInformation(Dl_info* information, struct link_map* map, uintptr_t ad
     buffer->path     = NULL;
     buffer->line     = 0;
     buffer->column   = 0;
-    buffer->address  = 0ULL;
+    buffer->address  = 0;
 
     if ((entry  = GetDebugEntry(unit, address)) &&
         (source = GetSourceCache(unit, entry)))
@@ -597,6 +649,7 @@ int GetDebugInformation(Dl_info* information, struct link_map* map, uintptr_t ad
         dwarf_lineoff_b(*line->line, &buffer->column, &error);
         pthread_mutex_unlock(&unit->lock);
         return 1;
+
       }
     }
 
@@ -660,6 +713,7 @@ static void TryUpdateDebugCache(debuginfod_client* client)
   list.length = 0;
 
   name = (char*)alloca(PATH_MAX);
+  memset(name, 0, PATH_MAX);
   readlink("/proc/self/exe", name, PATH_MAX);
   AppendNameList(&list, name);
 

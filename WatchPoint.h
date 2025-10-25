@@ -44,7 +44,7 @@ void TerminateWatch();
 int SetWatchPoint(int number, const void* address, uint32_t condition);
 int GetWatchPoint();
 
-int MakeWatchPointReport(siginfo_t* information, WatchPointReportFunction report);
+int MakeWatchPointReport(siginfo_t* information, void* context, WatchPointReportFunction report);
 
 #ifdef __cplusplus
 };

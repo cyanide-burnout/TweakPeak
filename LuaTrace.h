@@ -18,6 +18,14 @@
 extern "C"
 {
 #endif
+
+#define WRAP_TLC_CALL(call)                                \
+  ( {                                                      \
+      int result = call;                                   \
+      __asm__ __volatile__("" :: "r"(result) : "memory");  \
+      result;                                              \
+  } )
+
 #ifdef __x86_64__
 
 #define TLC_TRACEABLE
@@ -25,9 +33,9 @@ extern "C"
 int __attribute__((sysv_abi)) MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, lua_State* state);
 
 #ifndef LUATRACE_C
-#define lua_call(state, arguments, results)             MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, state)
-#define lua_pcall(state, arguments, results, function)  MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, state)
-#define lua_resume(state, arguments)                    MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, state)
+#define lua_call(state, arguments, results)             WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, state))
+#define lua_pcall(state, arguments, results, function)  WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, state))
+#define lua_resume(state, arguments)                    WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, state))
 #endif
 
 #endif
@@ -39,9 +47,9 @@ int __attribute__((sysv_abi)) MakeTraceableLuaCall(long method, long arguments, 
 int MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, long dummy3, long dummy4, lua_State* state);
 
 #ifndef LUATRACE_C
-#define lua_call(state, arguments, results)             MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, 0, 0, state)
-#define lua_pcall(state, arguments, results, function)  MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, 0, 0, state)
-#define lua_resume(state, arguments)                    MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, 0, 0, state)
+#define lua_call(state, arguments, results)             WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, 0, 0, state))
+#define lua_pcall(state, arguments, results, function)  WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, 0, 0, state))
+#define lua_resume(state, arguments)                    WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, 0, 0, state))
 #endif
 
 #endif
@@ -53,9 +61,9 @@ int MakeTraceableLuaCall(long method, long arguments, long results, long functio
 int MakeTraceableLuaCall(long method, long arguments, long results, long function, lua_State* state);
 
 #ifndef LUATRACE_C
-#define lua_call(state, arguments, results)             MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        state)
-#define lua_pcall(state, arguments, results, function)  MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, state)
-#define lua_resume(state, arguments)                    MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        state)
+#define lua_call(state, arguments, results)             WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        state))
+#define lua_pcall(state, arguments, results, function)  WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, state))
+#define lua_resume(state, arguments)                    WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        state))
 #endif
 
 #endif
@@ -66,14 +74,14 @@ int MakeTraceableLuaCall(long method, long arguments, long results, long functio
 #define TLC_PCALL   1
 #define TLC_RESUME  2
 
-lua_State* GetLuaStateOnStack();
+lua_State* GetLuaStateOnStack(void* context);
 
 #endif
 
 typedef void (*LuaTraceReportFunction)(int priority, const char* format, ...);
 
 int GetLuaTraceBack(lua_State* state, char* buffer, size_t size);
-int MakeLuaTraceReport(siginfo_t* information, LuaTraceReportFunction report);
+int MakeLuaTraceReport(siginfo_t* information, void* context, LuaTraceReportFunction report);
 
 #ifdef __cplusplus
 }
