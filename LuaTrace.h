@@ -19,9 +19,9 @@ extern "C"
 {
 #endif
 
-#define WRAP_TLC_CALL(call)                                \
+#define WRAP_TRACEABLE_CALL(expression)                    \
   ( {                                                      \
-      int result = call;                                   \
+      int result = expression;                             \
       __asm__ __volatile__("" :: "r"(result) : "memory");  \
       result;                                              \
   } )
@@ -33,9 +33,9 @@ extern "C"
 int __attribute__((sysv_abi)) MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, lua_State* state);
 
 #ifndef LUATRACE_C
-#define lua_call(state, arguments, results)             WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, state))
-#define lua_pcall(state, arguments, results, function)  WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, state))
-#define lua_resume(state, arguments)                    WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, state))
+#define lua_call(state, arguments, results)             WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, state))
+#define lua_pcall(state, arguments, results, function)  WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, state))
+#define lua_resume(state, arguments)                    WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, state))
 #endif
 
 #endif
@@ -47,9 +47,9 @@ int __attribute__((sysv_abi)) MakeTraceableLuaCall(long method, long arguments, 
 int MakeTraceableLuaCall(long method, long arguments, long results, long function, long dummy1, long dummy2, long dummy3, long dummy4, lua_State* state);
 
 #ifndef LUATRACE_C
-#define lua_call(state, arguments, results)             WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, 0, 0, state))
-#define lua_pcall(state, arguments, results, function)  WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, 0, 0, state))
-#define lua_resume(state, arguments)                    WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, 0, 0, state))
+#define lua_call(state, arguments, results)             WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        0, 0, 0, 0, state))
+#define lua_pcall(state, arguments, results, function)  WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, 0, 0, 0, 0, state))
+#define lua_resume(state, arguments)                    WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        0, 0, 0, 0, state))
 #endif
 
 #endif
@@ -61,9 +61,9 @@ int MakeTraceableLuaCall(long method, long arguments, long results, long functio
 int MakeTraceableLuaCall(long method, long arguments, long results, long function, lua_State* state);
 
 #ifndef LUATRACE_C
-#define lua_call(state, arguments, results)             WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        state))
-#define lua_pcall(state, arguments, results, function)  WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, state))
-#define lua_resume(state, arguments)                    WRAP_TLC_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        state))
+#define lua_call(state, arguments, results)             WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_CALL,   arguments, results, 0,        state))
+#define lua_pcall(state, arguments, results, function)  WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_PCALL,  arguments, results, function, state))
+#define lua_resume(state, arguments)                    WRAP_TRACEABLE_CALL(MakeTraceableLuaCall(TLC_RESUME, arguments, 0,       0,        state))
 #endif
 
 #endif

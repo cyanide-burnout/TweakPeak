@@ -11,10 +11,12 @@
 #include <fcntl.h>
 #include <link.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/select.h>
 
 #include <gelf.h>
 #include <libelf.h>
@@ -30,6 +32,7 @@ struct SourceLine
 {
   Dwarf_Addr address;
   Dwarf_Line* line;
+  Dwarf_Bool flag;
 };
 
 struct SourceCache
@@ -229,6 +232,14 @@ static struct DebugUnit* GetDebugUnit(const char* name, debuginfod_client* clien
     unit->handle = open(name, O_RDONLY);
 
     if ((unit->handle >= 0) &&
+        (unit->handle <  FD_SETSIZE) &&
+        ((result = fcntl(unit->handle, F_DUPFD, FD_SETSIZE)) >= 0))
+    {
+      close(unit->handle);
+      unit->handle = result;
+    }
+
+    if ((unit->handle >= 0) &&
         (unit->module  = elf_begin(unit->handle, ELF_C_READ, NULL)) &&
         (GetELFSection(unit->module, ".debug_info", &header) != NULL))
     {
@@ -259,6 +270,14 @@ static struct DebugUnit* GetDebugUnit(const char* name, debuginfod_client* clien
       unit->module = NULL;
 
       if ((unit->handle >= 0) &&
+          (unit->handle <  FD_SETSIZE) &&
+          ((result = fcntl(unit->handle, F_DUPFD, FD_SETSIZE)) >= 0))
+      {
+        close(unit->handle);
+        unit->handle = result;
+      }
+
+      if ((unit->handle >= 0) &&
           (unit->module  = elf_begin(unit->handle, ELF_C_READ, NULL)))
       {
         // Result does not matter
@@ -284,6 +303,13 @@ static struct DebugUnit* GetDebugUnit(const char* name, debuginfod_client* clien
 
       unit->handle = result;
       unit->module = NULL;
+
+      if ((unit->handle < FD_SETSIZE) &&
+          ((result = fcntl(unit->handle, F_DUPFD, FD_SETSIZE)) >= 0))
+      {
+        close(unit->handle);
+        unit->handle = result;
+      }
 
       if (unit->module = elf_begin(unit->handle, ELF_C_READ, NULL))
       {
@@ -326,10 +352,85 @@ static int CompareAddresses(const void* pointer1, const void* pointer2)
   line1 = (struct SourceLine*)pointer1;
   line2 = (struct SourceLine*)pointer2;
 
-  return (line1->address > line2->address) - (line1->address < line2->address);
+  if (line1->address != line2->address)
+  {
+    return (line1->address > line2->address) - (line1->address < line2->address);
+  }
+
+  // Put end-of-sequence markers before line entries at the same address
+  return (line2->flag != 0) - (line1->flag != 0);
 }
 
-static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address)
+static Dwarf_Unsigned GetBaseAddress(Dwarf_Die entry)
+{
+  Dwarf_Error error;
+  Dwarf_Unsigned low;
+
+  low = 0;
+  // Result code does not matter
+  dwarf_lowpc(entry, &low, &error);
+  return low;
+}
+
+#ifdef DW_LIBDWARF_VERSION
+
+static int CheckRangeList(Dwarf_Attribute attribute, uintptr_t address)
+{
+  Dwarf_Rnglists_Head head;
+  Dwarf_Unsigned count;
+  Dwarf_Unsigned value;
+  Dwarf_Unsigned index;
+  Dwarf_Unsigned base;
+
+  Dwarf_Unsigned raw1;
+  Dwarf_Unsigned raw2;
+  Dwarf_Unsigned low;
+  Dwarf_Unsigned high;
+
+  Dwarf_Bool missing;
+  Dwarf_Error error;
+  Dwarf_Half form;
+
+  unsigned length;
+  unsigned kind;
+  int result;
+
+  value  = 0;
+  result = 0;
+
+  if ((dwarf_whatform(attribute, &form, &error) == DW_DLV_OK) &&
+      ((form == DW_FORM_rnglistx) ?
+        (dwarf_formudata(attribute, &value, &error)      == DW_DLV_OK) :
+        (dwarf_global_formref(attribute, &value, &error) == DW_DLV_OK)) &&
+      (dwarf_rnglists_get_rle_head(attribute, form, value, &head, &count, &base, &error) == DW_DLV_OK))
+  {
+    for (index = 0; index < count; ++ index)
+    {
+      missing = 0;
+
+      // Cooked values (low/high) already include the applicable base address
+      if ((dwarf_get_rnglists_entry_fields_a(head, index, &length, &kind, &raw1, &raw2, &missing, &low, &high, &error) == DW_DLV_OK) &&
+          (missing == 0) &&
+          (kind != DW_RLE_end_of_list) &&
+          (kind != DW_RLE_base_address) &&
+          (kind != DW_RLE_base_addressx) &&
+          (address >= low) &&
+          (address <  high))
+      {
+        result = 1;
+        break;
+      }
+    }
+
+    dwarf_dealloc_rnglists_head(head);
+  }
+
+  return result;
+}
+
+#endif
+
+static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address, Dwarf_Unsigned base)
 {
   Dwarf_Half form;
   Dwarf_Error error;
@@ -346,6 +447,11 @@ static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address
   int number;
   int result;
 
+#ifdef DW_LIBDWARF_VERSION
+  Dwarf_Half version;
+  Dwarf_Half width;
+#endif
+
   low    = 0;
   high   = 0;
   result = 0;
@@ -358,8 +464,22 @@ static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address
     return (address >= low) && (address < high);
   }
 
-  if (dwarf_attr(entry, DW_AT_ranges, &attribute, &error) == DW_DLV_OK)  // <-- Memory leak?
+  if (dwarf_attr(entry, DW_AT_ranges, &attribute, &error) == DW_DLV_OK)
   {
+#ifdef DW_LIBDWARF_VERSION
+    version = 0;
+    // Result code does not matter
+    dwarf_get_version_of_die(entry, &version, &width);
+
+    if (version >= 5)
+    {
+      // DWARF5 stores ranges in .debug_rnglists which requires a separate API
+      result = CheckRangeList(attribute, address);
+      dwarf_dealloc(unit->instance, attribute, DW_DLA_ATTR);
+      return result;
+    }
+#endif
+
 #ifndef DW_LIBDWARF_VERSION
     if ((dwarf_global_formref(attribute, &offset, &error)                                    == DW_DLV_OK) &&
         (dwarf_get_ranges_a(unit->instance, offset, entry, &ranges, &count, &length, &error) == DW_DLV_OK))
@@ -371,9 +491,16 @@ static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address
     {
       for (number = 0; number < count; ++ number)
       {
-        if ((ranges[number].dwr_addr1 != 0) &&
-            (address >= ranges[number].dwr_addr1 + low) &&
-            (address <  ranges[number].dwr_addr2 + low))
+        if (ranges[number].dwr_type == DW_RANGES_ADDRESS_SELECTION)
+        {
+          // Base address selection entry overrides the base of the compilation unit
+          base = ranges[number].dwr_addr2;
+          continue;
+        }
+
+        if ((ranges[number].dwr_type == DW_RANGES_ENTRY) &&
+            (address >= ranges[number].dwr_addr1 + base) &&
+            (address <  ranges[number].dwr_addr2 + base))
         {
           result = 1;
           break;
@@ -393,7 +520,7 @@ static int CheckRange(struct DebugUnit* unit, Dwarf_Die entry, uintptr_t address
   return result;
 }
 
-static int IterateOverChildren(struct DebugUnit* unit, Dwarf_Die* entry, uintptr_t address)
+static int IterateOverChildren(struct DebugUnit* unit, Dwarf_Die* entry, uintptr_t address, Dwarf_Unsigned base)
 {
   int result;
 
@@ -411,7 +538,7 @@ static int IterateOverChildren(struct DebugUnit* unit, Dwarf_Die* entry, uintptr
     {
       if ((dwarf_tag(current, &tag, &error) == DW_DLV_OK) &&
           ((tag == DW_TAG_subprogram) || (tag == DW_TAG_inlined_subroutine)) &&
-          (CheckRange(unit, current, address) != 0))
+          (CheckRange(unit, current, address, base) != 0))
       {
           /*
             Don't replace entry with found DIE:
@@ -429,7 +556,7 @@ static int IterateOverChildren(struct DebugUnit* unit, Dwarf_Die* entry, uintptr
         dwarf_dealloc(unit->instance, attribute, DW_DLA_ATTR);
 
         if ((flag != 0) &&
-            (IterateOverChildren(unit, &current, address) != 0))
+            (IterateOverChildren(unit, &current, address, base) != 0))
         {
           /*
             Don't replace entry with found DIE:
@@ -443,7 +570,7 @@ static int IterateOverChildren(struct DebugUnit* unit, Dwarf_Die* entry, uintptr
 
 #ifndef DW_LIBDWARF_VERSION
       previous = current;
-      result   = dwarf_siblingof(unit->instance, previous, &current, &error);  // <-- Memory leak?
+      result   = dwarf_siblingof(unit->instance, previous, &current, &error);
 #else
       previous = current;
       result   = dwarf_siblingof_b(unit->instance, previous, 1, &current, &error);
@@ -496,13 +623,13 @@ static Dwarf_Die GetDebugEntry(struct DebugUnit* unit, uintptr_t address)
           (dwarf_siblingof(unit->instance, NULL, &entry, &error) == DW_DLV_OK) &&
           ((dwarf_tag(entry, &tag, &error) != DW_DLV_OK) ||
            (tag != DW_TAG_compile_unit) ||
-           (CheckRange(unit, entry, address) == 0)))
+           (CheckRange(unit, entry, address, GetBaseAddress(entry)) == 0)))
 #else
       if ((entry == NULL) &&
           (dwarf_siblingof_b(unit->instance, NULL, 1, &entry, &error) == DW_DLV_OK) &&
           ((dwarf_tag(entry, &tag, &error) != DW_DLV_OK) ||
            (tag != DW_TAG_compile_unit) ||
-           (CheckRange(unit, entry, address) == 0)))
+           (CheckRange(unit, entry, address, GetBaseAddress(entry)) == 0)))
 #endif
       {
         dwarf_dealloc(unit->instance, entry, DW_DLA_DIE);
@@ -522,11 +649,11 @@ static Dwarf_Die GetDebugEntry(struct DebugUnit* unit, uintptr_t address)
 #ifndef DW_LIBDWARF_VERSION
       if ((entry == NULL) &&  // Don't optimize a loop, cursor has to pass all compilation units
           (dwarf_siblingof(unit->instance, NULL, &entry, &error) == DW_DLV_OK) &&
-          (IterateOverChildren(unit, &entry, address) == 0))
+          (IterateOverChildren(unit, &entry, address, GetBaseAddress(entry)) == 0))
 #else
       if ((entry == NULL) &&
           (dwarf_siblingof_b(unit->instance, NULL, 1, &entry, &error) == DW_DLV_OK) &&
-          (IterateOverChildren(unit, &entry, address) == 0))
+          (IterateOverChildren(unit, &entry, address, GetBaseAddress(entry)) == 0))
 #endif
       {
         dwarf_dealloc(unit->instance, entry, DW_DLA_DIE);
@@ -549,6 +676,7 @@ static struct SourceCache* GetSourceCache(struct DebugUnit* unit, Dwarf_Die entr
   Dwarf_Line* limit;
   Dwarf_Line* line;
   Dwarf_Off offset;
+  Dwarf_Bool flag;
 
   // Result code does not matter
   dwarf_dieoffset(entry, &offset, &error);
@@ -580,7 +708,12 @@ static struct SourceCache* GetSourceCache(struct DebugUnit* unit, Dwarf_Die entr
 
     while (line < limit)
     {
-      last->line  = line; 
+      // Keep end-of-sequence markers to detect gaps between sequences
+      flag        = 0;
+      // Result code does not matter
+      dwarf_lineendsequence(*line, &flag, &error);
+      last->flag  = flag;
+      last->line  = line;
       last       += (dwarf_lineaddr(*line, &last->address, &error) == DW_DLV_OK);
       line       ++;
     }
@@ -635,21 +768,26 @@ int GetDebugInformation(Dl_info* information, struct link_map* map, uintptr_t ad
       limit = source->list + source->length;
 
       while ((line < limit) &&
-             (line->address < address))
+             (line->address <= address))
       {
         // Simply walk line-by-line
         line ++;
       }
 
-      if (line != limit)
+      // Take the last line starting at or before the address, unless
+      // it is an end-of-sequence marker (a gap between sequences)
+
+      if ((line != source->list) &&
+          ((line - 1)->flag == 0))
       {
+        line --;
+
         buffer->address = line->address + map->l_addr;
         dwarf_linesrc(*line->line, &buffer->path, &error);
         dwarf_lineno(*line->line, &buffer->line, &error);
         dwarf_lineoff_b(*line->line, &buffer->column, &error);
         pthread_mutex_unlock(&unit->lock);
         return 1;
-
       }
     }
 

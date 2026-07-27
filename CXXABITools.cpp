@@ -36,15 +36,16 @@
 // https://habr.com/ru/post/279149/
 // https://stackoverflow.com/questions/15670169/what-is-difference-between-sjlj-vs-dwarf-vs-seh
 
-union AlignedExeptionPointer
+union AlignedExceptionPointer
 {
   void* address;
   uintptr_t alignment;
   __cxxabiv1::__cxa_refcounted_exception* exception;
 };
 
-static bool CheckExceptionHandler(void* context, _Unwind_Exception* exception, int skip) noexcept
+static __attribute__((noinline, optimize("no-optimize-sibling-calls"))) bool CheckExceptionHandler(void* context, _Unwind_Exception* exception, int* condition, int skip) noexcept
 {
+  int result;
   unw_cursor_t cursor;
   unw_proc_info_t information;
 
@@ -54,14 +55,17 @@ static bool CheckExceptionHandler(void* context, _Unwind_Exception* exception, i
 
 #ifndef USE_GENERIC_UNWIND
 
-  int stack;
-  int region;
-  int language;
-  int instruction;
+  uintptr_t stack;
+  uintptr_t region;
+  uintptr_t language;
+  uintptr_t instruction;
   unw_word_t buffer[512];
 
   // Since not every runtime uses libunwind, the following part
-  // is required to recover a structure _Unwind_Context
+  // is required to recover a structure _Unwind_Context.
+  // The iota trick assumes libgcc unwind-dw2: accessors return stored
+  // words as-is, so the returned value equals the field index in the
+  // buffer. Recheck if the unwinder changes (e.g. LLVM libunwind)
 
   state = reinterpret_cast<_Unwind_Context*>(buffer);
 
@@ -85,23 +89,26 @@ static bool CheckExceptionHandler(void* context, _Unwind_Exception* exception, i
   if (context != nullptr)
   {
     // Likely called by signal handler with alternative stack
-    unw_init_local2(&cursor, reinterpret_cast<unw_context_t*>(context), UNW_INIT_SIGNAL_FRAME);
+    result  = unw_init_local2(&cursor, reinterpret_cast<unw_context_t*>(context), UNW_INIT_SIGNAL_FRAME);
+    result ++;
   }
   else
   {
     context = alloca(sizeof(unw_context_t));
     unw_getcontext(reinterpret_cast<unw_context_t*>(context));
-    unw_init_local(&cursor, reinterpret_cast<unw_context_t*>(context));
+    result  = unw_init_local(&cursor, reinterpret_cast<unw_context_t*>(context));
+    result ++;
+
+    while ((result > 0) &&
+           (skip   > 0))
+    {
+      // It seems like noexcept functions make false positives
+      skip --;
+      result = unw_step(&cursor);
+    }
   }
 
-  while ((skip > 0) &&
-         (unw_step(&cursor) > 0))
-  {
-    // It seems like noexcept functions make false positives
-    skip --;
-  }
-
-  while (unw_step(&cursor) > 0)
+  while (result > 0)
   {
     if ((unw_get_proc_info(&cursor, &information) == UNW_ESUCCESS) &&
         (function = reinterpret_cast<_Unwind_Stop_Fn>(information.handler)))
@@ -116,17 +123,19 @@ static bool CheckExceptionHandler(void* context, _Unwind_Exception* exception, i
 
       reason = function(1, _UA_SEARCH_PHASE, exception->exception_class, exception, state, nullptr);
 
-      if (reason == _URC_HANDLER_FOUND)    return true;
+      if (reason == _URC_HANDLER_FOUND)    return (condition == nullptr) || (*condition > 0);
       if (reason != _URC_CONTINUE_UNWIND)  return false;
     }
+
+    result = unw_step(&cursor);
   }
 
   return false;
 }
 
-bool CheckExceptionHandler(void* context, const std::type_info& type, std::size_t size) noexcept
+__attribute__((noinline, optimize("no-optimize-sibling-calls"))) bool CheckExceptionHandler(void* context, const std::type_info& type, std::size_t size) noexcept
 {
-  AlignedExeptionPointer pointer;
+  AlignedExceptionPointer pointer;
 
   size += sizeof(__cxxabiv1::__cxa_refcounted_exception);
 
@@ -137,7 +146,7 @@ bool CheckExceptionHandler(void* context, const std::type_info& type, std::size_
   memset(pointer.exception, 0, size);
   __cxxabiv1::__cxa_init_primary_exception(pointer.exception + 1, const_cast<std::type_info*>(&type), nullptr);
 
-  return CheckExceptionHandler(context, &pointer.exception->exc.unwindHeader, 2);
+  return CheckExceptionHandler(context, &pointer.exception->exc.unwindHeader, &pointer.exception->exc.handlerSwitchValue, 1);
 }
 
 // ExceptionTrace
@@ -147,10 +156,16 @@ bool CheckExceptionHandler(void* context, const std::type_info& type, std::size_
 
 #define EXCEPTION_TRACE_MAGIC  0xaec5b15b7c84baeeULL
 
+// The magic is deliberately placed right before the ABI header: when a checked
+// pointer was NOT allocated here (libstdc++ emergency pool, foreign runtime),
+// the read lands exactly on the allocator's own metadata (glibc malloc chunk
+// size word or pool bookkeeping) - always mapped and never equal to the magic.
+// Assumptions: glibc malloc layout, x86-64/arm64; recheck for musl.
+
 struct TraceableException
 {
   struct ExceptionTrace trace;
-  uint64_t alignment;
+  uint64_t alignment;  // Positions the magic over the allocator metadata, see above
   uint64_t magic;
   __cxxabiv1::__cxa_refcounted_exception exception;
   char data[0];
@@ -213,6 +228,12 @@ extern "C" void* __cxxabiv1::__cxa_allocate_exception(std::size_t size) noexcept
     return exception->data;
   }
 
+  if (AllocateException == nullptr)
+  {
+    // In case the exception is thrown before Initialize()
+    AllocateException = reinterpret_cast<AllocateExceptionFunction>(dlsym(RTLD_NEXT, "__cxa_allocate_exception"));
+  }
+
   return AllocateException(size);
 }
 
@@ -229,6 +250,12 @@ extern "C" void __cxxabiv1::__cxa_free_exception(void* pointer) noexcept
     return;
   }
 
+  if (FreeException == nullptr)
+  {
+    // In case the exception was allocated before Initialize()
+    FreeException = reinterpret_cast<FreeExceptionFunction>(dlsym(RTLD_NEXT, "__cxa_free_exception"));
+  }
+
   FreeException(pointer);
 }
 
@@ -241,7 +268,7 @@ extern "C" const ExceptionTrace* GetExceptionTrace(const void* pointer) noexcept
   return
     (exception->magic       == EXCEPTION_TRACE_MAGIC) &&
     (exception->trace.begin <= exception->trace.end)  ?
-    &exception->trace                                 : 
+    &exception->trace                                 :
     nullptr;
 }
 
@@ -271,8 +298,20 @@ char* GetDemangledName(const char* name) noexcept
   return abi::__cxa_demangle(name, nullptr, nullptr, &status);
 }
 
+struct DemangleBuffer
+{
+  char* data;
+  std::size_t length;
+
+  ~DemangleBuffer() { free(data); }
+};
+
 const char* GetVirtualClassName(const void* pointer) noexcept
 {
+  static thread_local DemangleBuffer buffer { nullptr, 0 };
+
+  int status;
+  char* result;
   const char* name;
   const std::type_info* type;
 
@@ -280,7 +319,18 @@ const char* GetVirtualClassName(const void* pointer) noexcept
 
   if (type != nullptr)
   {
-    for (name = type->name(); (*name >= '0') && (*name <= '9'); ++ name);
+    name   = type->name();
+    result = abi::__cxa_demangle(name, buffer.data, &buffer.length, &status);
+
+    if (result != nullptr)
+    {
+      // Buffer is reused, the result stays valid until the next call on the same thread
+      buffer.data = result;
+      return result;
+    }
+
+    // Not signal-safe anymore because of the demangler, fall back for simple names
+    for (; (*name >= '0') && (*name <= '9'); ++ name);
     return name;
   }
 

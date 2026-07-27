@@ -32,6 +32,8 @@ extern "C" const ExceptionTrace* GetExceptionTrace(const void* pointer) noexcept
 const std::type_info* GetVirtualClassType(const void* pointer) noexcept;
 
 extern "C" char* GetDemangledName(const char* name) noexcept;
+
+// Returned string is valid until the next call on the same thread
 extern "C" const char* GetVirtualClassName(const void* pointer) noexcept;
 
 #else
