@@ -162,6 +162,48 @@ With reuse dladdr1() data:
 
 ```
 
+## Lambda
+
+Allows passing a capturing C++ lambda to C code and invoking it there directly, without a wrapper at the call site.
+
+This header-only bridge mirrors the internal layout and invoker convention of `std::function`. It requires GNU libstdc++ and the Itanium C++ ABI, as used by amd64 and arm64 Linux. Shared signatures may contain only C-compatible types passed by value and are limited to eight arguments.
+
+C code may call the object with `CallLambda()` and check whether it is empty with `CheckLambda()`, but may not copy, destroy or store it. The object is valid only while the owning C++ `std::function` is alive.
+
+Shared header:
+
+```C
+#include "Lambda.h"
+
+typedef Lambda(int, int) Handler;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int Process(Handler handler);
+
+#ifdef __cplusplus
+}
+#endif
+```
+
+C implementation:
+
+```C
+int Process(Handler handler)
+{
+  return CheckLambda(handler) ? CallLambda(handler, 5) : -1;
+}
+```
+
+C++ caller:
+
+```C++
+int offset = 7;
+int result = Process([offset] (int value) { return value + offset; });
+```
+
 
 ## P.S.
 
