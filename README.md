@@ -166,9 +166,9 @@ With reuse dladdr1() data:
 
 Allows passing a capturing C++ lambda to C code and invoking it there directly, without a wrapper at the call site.
 
-This header-only bridge mirrors the internal layout and invoker convention of `std::function`. It requires GNU libstdc++ and the Itanium C++ ABI, as used by amd64 and arm64 Linux. Shared signatures may contain only C-compatible types passed by value and are limited to eight arguments.
+This header-only bridge mirrors the internal layout, invoker and manager conventions of `std::function`. It requires GNU libstdc++ and the Itanium C++ ABI, as used by amd64 and arm64 Linux. Shared signatures may contain only C-compatible types passed by value and are limited to eight arguments.
 
-C code may call the object with `CallLambda()` and check whether it is empty with `CheckLambda()`, but may not copy, destroy or store it. The object is valid only while the owning C++ `std::function` is alive.
+C code may call the object with `CallLambda()` and check whether it is empty with `CheckLambda()`. The received pointer is valid only while the owning C++ `std::function` is alive.
 
 Shared header:
 
@@ -202,6 +202,31 @@ C++ caller:
 ```C++
 int offset = 7;
 int result = Process([offset] (int value) { return value + offset; });
+```
+
+### Storing
+
+To retain a lambda beyond the call, declare zero-initialized storage with `LambdaHolder()`, copy the closure with `CloneLambda()` and release it with `DestroyLambda()`.
+
+`CloneLambda()` replaces any previous content of the target and also supports cloning a holder over itself. `DestroyLambda()` leaves the holder empty and may be called repeatedly. Cloning invokes the capture's copy constructor and may allocate; an exception propagating through C code should be treated as fatal.
+
+```C
+static LambdaHolder(Handler) Stored;
+
+void Store(Handler handler)
+{
+  CloneLambda(&Stored, handler);
+}
+
+int InvokeStored(int value)
+{
+  return CheckLambda(&Stored) ? CallLambda(&Stored, value) : -1;
+}
+
+void ReleaseStored(void)
+{
+  DestroyLambda(&Stored);
+}
 ```
 
 

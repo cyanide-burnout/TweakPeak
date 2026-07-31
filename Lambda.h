@@ -26,6 +26,11 @@
      returns. This is why the C side declares a structure pointer
      where the C++ side declares std::function by value.
 
+  4. The internal manager convention bool (*)(_Any_data&,
+     const _Any_data&, _Manager_operation) and the operation codes
+     __clone_functor and __destroy_functor used by CloneLambda()
+     and DestroyLambda() (pinned by the static_assert block below).
+
   Any of these may change with another standard library or a future
   libstdc++ release. The checks are intentionally written against
   internal libstdc++ names so that such a change stops the build
@@ -42,10 +47,23 @@
     compiler reject a mismatch, cast explicitly where needed
     (CallLambda(handler, (const char*)"text")).
 
-  - C code may not copy, destroy or store the object. The pointer is
-    valid only while the owning C++ std::function is alive: for an
-    argument created from a temporary lambda that means the duration
-    of the call which received it.
+  - The received pointer is valid only while the owning C++
+    std::function is alive: for an argument created from a temporary
+    lambda that means the duration of the call which received it.
+    To keep the object beyond the call, clone it with CloneLambda()
+    into own storage declared with LambdaHolder() and release it
+    with DestroyLambda(). The clone is fully independent of the
+    source. Holder storage must be zero-initialized before first
+    use (static storage or = {0}): CloneLambda() assigns, releasing
+    the previous content of the target, so cloning over garbage
+    calls a garbage manager. Cloning a holder over itself is safe.
+    DestroyLambda() leaves the holder empty and is safe to repeat;
+    CheckLambda() works on holders.
+
+  - CloneLambda() runs the copy constructor of the capture and may
+    allocate: an exception thrown there propagates through the C
+    frames to the C++ caller with no cleanup on the C side, so treat
+    a throwing clone as fatal.
 
   Usage:
 
@@ -77,6 +95,20 @@
 
     int c = 7;
     Process([c] (int a, int b) -> int { return a + b + c; });
+
+  Storing (Handler.c):
+
+    static LambdaHolder(HandlerFunction) stored;
+
+    void Retain(HandlerFunction handler)
+    {
+      CloneLambda(&stored, handler);
+    }
+
+    void Release()
+    {
+      DestroyLambda(&stored);
+    }
 */
 
 #ifdef __cplusplus
@@ -97,6 +129,14 @@ static_assert(std::is_same<
   decltype(&std::_Function_handler<int (int), int (*)(int)>::_M_invoke),
   int (*)(const std::_Any_data&, int&&)>::value,
   "libstdc++ std::function invoker convention does not match Lambda.h");
+
+static_assert(((int)std::__clone_functor == 2) && ((int)std::__destroy_functor == 3),
+  "libstdc++ manager operation codes do not match Lambda.h");
+
+static_assert(std::is_same<
+  decltype(&std::_Function_base::_Base_manager<int (*)(int)>::_M_manager),
+  bool (*)(std::_Any_data&, const std::_Any_data&, std::_Manager_operation)>::value,
+  "libstdc++ manager convention does not match Lambda.h");
 
 #else
 
@@ -126,7 +166,7 @@ static_assert(std::is_same<
     struct                                                                         \
     {                                                                              \
       char data[2 * sizeof(void*)];                                                \
-      void* manager;                                                               \
+      _Bool (*manager)(void* target, const void* source, int operation);           \
       type (*invoker)(const void* functor LAMBDA_MAP(LAMBDA_TYPE, ##__VA_ARGS__)); \
     } *
 
@@ -140,6 +180,30 @@ static_assert(std::is_same<
     ({                                                           \
       __auto_type LambdaObject = (lambda);                       \
       (LambdaObject != NULL) && (LambdaObject->manager != NULL); \
+    })
+
+#define LambdaHolder(type)  __typeof__(*(type)NULL)
+
+#define CloneLambda(target, source)                                                           \
+    ({                                                                                        \
+      __auto_type LambdaTarget = (target);                                                    \
+      __auto_type LambdaSource = (source);                                                    \
+      __typeof__(*LambdaTarget) LambdaValue = { 0 };                                          \
+      LambdaValue.manager = LambdaSource->manager;                                            \
+      LambdaValue.invoker = LambdaSource->invoker;                                            \
+      if (LambdaValue.manager != NULL)                                                        \
+        LambdaValue.manager(&LambdaValue.data, &LambdaSource->data, 2 /* __clone_functor */); \
+      DestroyLambda(LambdaTarget);                                                            \
+      *LambdaTarget = LambdaValue;                                                            \
+    })
+
+#define DestroyLambda(lambda)                                                                       \
+    ({                                                                                              \
+      __auto_type LambdaObject = (lambda);                                                          \
+      if (LambdaObject->manager != NULL)                                                            \
+        LambdaObject->manager(&LambdaObject->data, &LambdaObject->data, 3 /* __destroy_functor */); \
+      LambdaObject->manager = NULL;                                                                 \
+      LambdaObject->invoker = NULL;                                                                 \
     })
 
 #endif
