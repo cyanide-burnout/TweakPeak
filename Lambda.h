@@ -5,6 +5,12 @@
   Lambda: pass a C++ lambda into C code and call it there directly,
   with no wrapper at the call site.
 
+  Lambdas are the primary use case, but the C++ side uses
+  std::function as its parameter type, so any compatible callable
+  accepted by std::function -- function pointers, stateful functors,
+  bind/bind_front results and reference_wrapper -- crosses through
+  the same C representation and API without a dedicated adapter.
+
   The C++ side sees std::function<type (types)>, the C side sees a
   pointer to a structure that mirrors the libstdc++ layout of
   std::function: _Any_data (two pointers), _M_manager, _M_invoker.
