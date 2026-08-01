@@ -170,6 +170,8 @@ This header-only bridge mirrors the internal layout, invoker and manager convent
 
 C code may call the object with `CallLambda()` and check whether it is empty with `CheckLambda()`. The received pointer is valid only while the owning C++ `std::function` is alive.
 
+`LambdaHolder(type)` is owning storage represented by a native `std::function` in C++ and its inline layout mirror in C. It can be declared in shared headers and embedded in shared structures, but must cross the language boundary only by pointer, never by value or `memcpy`. C storage must be zero-initialized and explicitly destroyed; C++ storage has normal `std::function` lifetime and may be manipulated from C.
+
 Shared header:
 
 ```C
@@ -206,7 +208,7 @@ int result = Process([offset] (int value) { return value + offset; });
 
 ### Storing
 
-To retain a lambda beyond the call, declare zero-initialized storage with `LambdaHolder()`, copy the closure with `CloneLambda()` and release it with `DestroyLambda()`.
+To retain a lambda beyond the call in C, declare zero-initialized storage with `LambdaHolder()`, copy the closure with `CloneLambda()` and release it with `DestroyLambda()`.
 
 `CloneLambda()` replaces any previous content of the target and also supports cloning a holder over itself. `DestroyLambda()` leaves the holder empty and may be called repeatedly. Cloning invokes the capture's copy constructor and may allocate; an exception propagating through C code should be treated as fatal.
 
