@@ -172,9 +172,9 @@ This header-only bridge mirrors the internal layout, invoker and manager convent
 
 Lambdas are the primary use case, but the C++ parameter is a `std::function`. Any compatible callable accepted by `std::function` therefore crosses through the same C representation and API without a dedicated adapter. This includes function pointers, stateful functors, `std::bind`/`std::bind_front` results and `std::reference_wrapper`.
 
-The conversion happens on the C++ side. C always receives the same erased object and calls it through `CallLambda()`, regardless of the original callable type.
+The conversion happens on the C++ side. C always receives the same erased object and calls it through `InvokeLambda()`, regardless of the original callable type.
 
-C code may call the object with `CallLambda()` and check whether it is empty with `CheckLambda()`. The received pointer is valid only while the owning C++ `std::function` is alive.
+C code may invoke the object with `InvokeLambda()` and check whether it is empty with `CheckLambda()`. The received pointer is valid only while the owning C++ `std::function` is alive.
 
 `LambdaHolder(type)` is owning storage represented by a native `std::function` in C++ and its inline layout mirror in C. It can be declared in shared headers and embedded in shared structures, but must cross the language boundary only by pointer, never by value or `memcpy`. C storage must be zero-initialized and explicitly destroyed; C++ storage has normal `std::function` lifetime and may be manipulated from C.
 
@@ -201,7 +201,7 @@ C implementation:
 ```C
 int Process(Handler handler)
 {
-  return CheckLambda(handler) ? CallLambda(handler, 5) : -1;
+  return CheckLambda(handler) ? InvokeLambda(handler, 5) : -1;
 }
 ```
 
@@ -228,7 +228,7 @@ void Store(Handler handler)
 
 int InvokeStored(int value)
 {
-  return CheckLambda(&Stored) ? CallLambda(&Stored, value) : -1;
+  return CheckLambda(&Stored) ? InvokeLambda(&Stored, value) : -1;
 }
 
 void ReleaseStored(void)
