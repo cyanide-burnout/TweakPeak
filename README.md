@@ -237,6 +237,72 @@ void ReleaseStored(void)
 }
 ```
 
+## Selector
+
+When you can't get away from `select()` but have many handles registered and only a few ready at a time. Selector walks the ready bitmaps returned by the kernel instead of the list of registered handlers: each 64-bit word is checked for zero, set bits are extracted with `ctz`, and the handler is found by direct array index. User-space cost of one pass is O(size / 64 + ready) instead of O(registered).
+
+Storage grows on demand (doubling) when a handle beyond the current size is registered, also from a handler during a dispatch, and never shrinks: a handle number reached once will be reached again. The whole storage is passed to `select()` as `nfds`, an empty tail costs only a few zero words. Size may exceed `FD_SETSIZE`. Linux accepts larger sets natively, on Darwin `select()` returns `EINVAL` for `nfds > FD_SETSIZE` unless `_DARWIN_UNLIMITED_SELECT` is defined, which links `select$DARWIN_EXTSN` instead. Since `select()` is called by your code, the macro has to be in effect in your translation unit: Selector.h defines it, so include it before anything that pulls in `<sys/select.h>`, or pass `-D_DARWIN_UNLIMITED_SELECT` project wide. The practical ceiling is then `RLIMIT_NOFILE`, bounded by `kern.maxfilesperproc`; note that processes started by launchd get a soft limit of 256 and have to raise it with `setrlimit()`. Registration masks are kept persistent and copied with `memcpy()` before every call, no `FD_SET()` per handle. The code relies on the little-endian bit layout of `fd_set` shared by glibc and Darwin, the build fails on other byte orders.
+
+Dispatch is reentrant: handlers may add, change or remove any handle, including their own and the ones still pending in the current pass. Removing an event also drops it from the pending results, so a handler is never called for an event it is no longer registered for, and a handle number closed and reused by a new owner within the same pass never receives the events of the old one. The only rule is to remove a handle (events = 0) before closing it. Calling `PrepareSelector()` or `DispatchSelector()` from a handler fails with `EDEADLK`.
+
+The wait itself stays with the caller: `PrepareSelector()` fills the sets and returns `nfds`, you call `select()` or `pselect()` with your own timeout and signal mask, and pass its result to `DispatchSelector()`. The sets stay valid until a registration grows the storage, so don't register anything between `PrepareSelector()` and the return of `select()`.
+
+```C
+static void HandleRead(struct Selector* selector, int handle, uint32_t events, void* closure)
+{
+  char buffer[256];
+
+  if (read(handle, buffer, sizeof(buffer)) <= 0)
+  {
+    SetSelectorHandler(selector, handle, 0, NULL, NULL);  // remove before close
+    close(handle);
+  }
+}
+
+struct Selector* selector = CreateSelector();
+
+SetSelectorHandler(selector, STDIN_FILENO, SELECTOR_EVENT_READ, HandleRead, NULL);
+
+fd_set* readable;
+fd_set* writable;
+fd_set* exceptional;
+int count;
+
+do
+{
+  count = PrepareSelector(selector, &readable, &writable, &exceptional);
+  count = select(count, readable, writable, exceptional, NULL);
+  count = DispatchSelector(selector, count);
+}
+while ((count >= 0) || (errno == EINTR));
+
+ReleaseSelector(selector);
+```
+
+### Tests and benchmark
+
+`SelectorTest.c` covers the reentrancy cases: a pending handle closed and its number reused within the same pass, dropping one event of a pending handle, storage growth from a handler, handles above `FD_SETSIZE`, nested calls and argument checks.
+
+```sh
+cc -std=c11 -g -fsanitize=address,undefined Selector.c SelectorTest.c -o SelectorTest && ./SelectorTest
+cc -std=c11 -O2 Selector.c SelectorBench.c -o SelectorBench && ./SelectorBench [simulated | real]
+```
+
+`SelectorBench.c` compares Selector with the classic loop over a list of individually allocated source objects (`FD_ZERO` + `FD_SET` per source, then `FD_ISSET` per source). The `simulated` mode replaces `select()` with copying a prepared result to measure the user-space part alone, the `real` mode runs `select()` with a zero timeout over pipes.
+
+Apple M3 Max, ns per iteration, N registered, R ready:
+
+| N | R | classic | Selector |
+|---|---|---|---|
+| 64 | 1 | 227 | 16 |
+| 64 | 64 | 257 | 289 |
+| 1024 | 1 | 3595 | 32 |
+| 1024 | 102 | 4309 | 203 |
+| 1024 | 1024 | 5249 | 2702 |
+| 4096 | 1 | 36675 | 110 |
+
+With few ready handles the user-space cost barely depends on N. With all of them ready and small N, Selector is slower than a loop with a persistent mask: reentrancy makes it reload the sets after every handler call. With the real `select()` the kernel dominates (about 30 µs for 1024 pipes), so the end-to-end gain is about 1.0–1.4×.
+
 
 ## P.S.
 
